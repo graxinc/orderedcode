@@ -162,21 +162,54 @@ type decr struct {
 	val interface{}
 }
 
+func AppendString(buf []byte, v string, desc bool) []byte {
+	n := len(buf)
+
+	buf = appendString(buf, v)
+
+	if desc {
+		invert(buf[n:])
+	}
+
+	return buf
+}
+
+func AppendInt64(buf []byte, v int64, desc bool) []byte {
+	n := len(buf)
+
+	buf = appendInt64(buf, v)
+
+	if desc {
+		invert(buf[n:])
+	}
+
+	return buf
+}
+
 // Append appends the encoded representations of items to buf. Items can have
 // different underlying types, but each item must have type T or be the value
 // Decr(somethingOfTypeT), for T in the set: string, struct{}, StringOrInfinity,
 // TrailingString, float64, int64 or uint64.
+// NOTE it is recommended to use the typed Append funcs such as AppendString.
 func Append(buf []byte, items ...interface{}) ([]byte, error) {
+Loop:
 	for _, item := range items {
-		n := len(buf)
 		d, dOK := item.(decr)
 		if dOK {
 			item = d.val
 		}
-
 		switch x := item.(type) {
 		case string:
-			buf = appendString(buf, x)
+			buf = AppendString(buf, x, dOK)
+			continue Loop
+		case int64:
+			buf = AppendInt64(buf, x, dOK)
+			continue Loop
+		}
+
+		n := len(buf)
+
+		switch x := item.(type) {
 		case struct{}:
 			buf = appendInfinity(buf)
 		case StringOrInfinity:
@@ -192,8 +225,6 @@ func Append(buf []byte, items ...interface{}) ([]byte, error) {
 			buf = append(buf, string(x)...)
 		case float64:
 			buf = appendFloat64(buf, x)
-		case int64:
-			buf = appendInt64(buf, x)
 		case uint64:
 			buf = appendUint64(buf, x)
 		default:
@@ -358,11 +389,28 @@ const (
 // requested types.
 var errCorrupt = errors.New("orderedcode: corrupt input")
 
+func ParseString(buf, encoded []byte, v *string, desc bool) (bufOut, remaining []byte, _ error) {
+	dir := increasing
+	if desc {
+		dir = decreasing
+	}
+	return parseStringFromBytes(buf, v, encoded, dir)
+}
+
+func ParseInt64(encoded []byte, v *int64, desc bool) (remaining []byte, _ error) {
+	dir := increasing
+	if desc {
+		dir = decreasing
+	}
+	return parseInt64FromBytes(v, encoded, dir)
+}
+
 // Parse parses the next len(items) of their respective types and returns any
 // remaining encoded data. Items can have different underlying types, but each
 // item must have type *T or be the value Decr(somethingOfTypeStarT), for T in
 // the set: string, struct{}, StringOrInfinity, TrailingString, float64, int64
 // or uint64.
+// NOTE it is recommended to use the typed Parse funcs such as ParseString.
 func Parse(encoded string, items ...interface{}) (remaining string, err error) {
 	for _, item := range items {
 		dir := increasing
@@ -410,15 +458,22 @@ func Parse(encoded string, items ...interface{}) (remaining string, err error) {
 }
 
 func parseString(dst *string, s string, dir byte) (string, error) {
+	_, rem, err := parseStringFromBytes(nil, dst, []byte(s), dir)
+	if err != nil {
+		return "", err
+	}
+	return string(rem), nil
+}
+
+func parseStringFromBytes(buf []byte, dst *string, s []byte, dir byte) (bufOut, remaining []byte, _ error) {
 	var (
-		buf     []byte
 		last, i int
 	)
 	for i < len(s) {
 		switch v := s[i] ^ dir; v {
 		case 0x00:
 			if i+1 >= len(s) {
-				return "", errCorrupt
+				return buf, nil, errCorrupt
 			}
 			switch s[i+1] ^ dir {
 			case 0x01:
@@ -427,15 +482,15 @@ func parseString(dst *string, s string, dir byte) (string, error) {
 					// As an optimization, if no \x00 or \xff bytes were escaped,
 					// and the result does not need inverting, then set *dst to a
 					// sub-string of the original input.
-					*dst = s[:i]
-					return s[i+2:], nil
+					*dst = string(s[:i])
+					return buf, s[i+2:], nil
 				}
 				buf = append(buf, s[last:i]...)
 				if dir != increasing {
 					invert(buf)
 				}
 				*dst = string(buf)
-				return s[i+2:], nil
+				return buf, s[i+2:], nil
 			case 0xff:
 				// Unescape the \x00.
 				buf = append(buf, s[last:i]...)
@@ -443,11 +498,11 @@ func parseString(dst *string, s string, dir byte) (string, error) {
 				i += 2
 				last = i
 			default:
-				return "", errCorrupt
+				return buf, nil, errCorrupt
 			}
 		case 0xff:
 			if i+1 >= len(s) || s[i+1]^dir != 0x00 {
-				return "", errCorrupt
+				return buf, nil, errCorrupt
 			}
 			// Unescape the \xff.
 			buf = append(buf, s[last:i]...)
@@ -458,7 +513,7 @@ func parseString(dst *string, s string, dir byte) (string, error) {
 			i++
 		}
 	}
-	return "", errCorrupt
+	return buf, nil, errCorrupt
 }
 
 func parseInfinity(s string, dir byte) (string, error) {
@@ -487,8 +542,16 @@ func parseFloat64(dst *float64, s string, dir byte) (string, error) {
 }
 
 func parseInt64(dst *int64, s string, dir byte) (string, error) {
+	rem, err := parseInt64FromBytes(dst, []byte(s), dir)
+	if err != nil {
+		return "", err
+	}
+	return string(rem), nil
+}
+
+func parseInt64FromBytes(dst *int64, s []byte, dir byte) ([]byte, error) {
 	if len(s) == 0 {
-		return "", errCorrupt
+		return nil, errCorrupt
 	}
 	// Fast-path any single-byte encoding.
 	c := s[0] ^ dir
@@ -505,13 +568,13 @@ func parseInt64(dst *int64, s string, dir byte) (string, error) {
 	n := 0
 	if c == 0xff {
 		if len(s) == 1 {
-			return "", errCorrupt
+			return nil, errCorrupt
 		}
 		s = s[1:]
 		c = s[0] ^ dir
 		// The encoding of the largest int64 (1<<63-1) starts with "\xff\xc0".
 		if c > 0xc0 {
-			return "", errCorrupt
+			return nil, errCorrupt
 		}
 		// The 7 (being 8 - 1) is for the same reason as in appendInt64.
 		n = 7
@@ -522,7 +585,7 @@ func parseInt64(dst *int64, s string, dir byte) (string, error) {
 		n++
 	}
 	if len(s) < n {
-		return "", errCorrupt
+		return nil, errCorrupt
 	}
 	// Decode the big-endian, invert if necessary, and return.
 	x := int64(c)
