@@ -174,6 +174,18 @@ func AppendString(buf []byte, v string, desc bool) []byte {
 	return buf
 }
 
+func AppendTrailingString(buf []byte, v string, desc bool) []byte {
+	n := len(buf)
+
+	buf = append(buf, v...)
+
+	if desc {
+		invert(buf[n:])
+	}
+
+	return buf
+}
+
 func AppendInt64(buf []byte, v int64, desc bool) []byte {
 	n := len(buf)
 
@@ -205,6 +217,9 @@ Loop:
 		case int64:
 			buf = AppendInt64(buf, x, dOK)
 			continue Loop
+		case TrailingString:
+			buf = AppendTrailingString(buf, string(x), dOK)
+			continue Loop
 		}
 
 		n := len(buf)
@@ -221,8 +236,6 @@ Loop:
 			} else {
 				buf = appendString(buf, x.String)
 			}
-		case TrailingString:
-			buf = append(buf, string(x)...)
 		case float64:
 			buf = appendFloat64(buf, x)
 		case uint64:
@@ -405,6 +418,17 @@ func ParseInt64(encoded []byte, v *int64, desc bool) (remaining []byte, _ error)
 	return parseInt64FromBytes(v, encoded, dir)
 }
 
+func ParseTrailingString(encoded []byte, v *string, desc bool) error {
+	if !desc {
+		*v = string(encoded)
+		return nil
+	}
+
+	invert(encoded)
+	*v = string(encoded)
+	return nil
+}
+
 // Parse parses the next len(items) of their respective types and returns any
 // remaining encoded data. Items can have different underlying types, but each
 // item must have type *T or be the value Decr(somethingOfTypeStarT), for T in
@@ -434,13 +458,8 @@ func Parse(encoded string, items ...interface{}) (remaining string, err error) {
 				}
 			}
 		case *TrailingString:
-			if dir == increasing {
-				*x, encoded = TrailingString(encoded), ""
-			} else {
-				b := []byte(encoded)
-				invert(b)
-				*x, encoded = TrailingString(b), ""
-			}
+			err = ParseTrailingString([]byte(encoded), (*string)(x), dir == decreasing)
+			encoded = ""
 		case *float64:
 			encoded, err = parseFloat64(x, encoded, dir)
 		case *int64:
